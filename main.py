@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 from threading import Thread
 import random
 from PIL import Image
+import time
 
 # Load MNIST dataset
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
@@ -20,8 +21,13 @@ from PIL import Image
 x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
 x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
 
+epochs = 10
+
+min_lr = 0.0001
+max_lr = 0.01
+
 # Initialize neural network and data lists
-nn = NeuralNetwork(784, 256, 10, load=False)
+nn = NeuralNetwork(784, 128, 10, load=False)
 errors = []
 gens = []
 accuracies = []
@@ -97,29 +103,50 @@ def update_graph(n):
 
 def test_accuracy(samples=1000):
     good = 0
+
     for _ in range(samples):
         j = random.randint(0, len(x_test) - 1)
-        x = x_test[j]
+        x = x_test[j].flatten()
 
-        x = augment_image(x, 30, 50).flatten()
+        #x = augment_image(x, 30, 50).flatten()
 
         y = y_test[j]
         prediction = np.argmax(nn.forward(x))
         good += int(prediction == y)
-    return round((good / samples) * 10000) / 100
 
+    return round((good / samples) * 10000) / 100
 
 def training_loop():
     global gen, epoch, errors, gens, accuracies, accuracy_gens
-    while True:
-        epoch += 1
-        print(f"Epoch {epoch}")
+
+    step = (max_lr - min_lr) / epochs
+
+    lr = max_lr + step
+
+    time.sleep(0.1)
+
+    start_time = time.time()
+
+    print("\nStarted training \n")
+
+    print(f"Total epochs: {epochs}")
+
+    print(f"Max lr: {max_lr} \nMin lr: {min_lr} \n")
+
+    for epoch in range(1, epochs + 1):
+        lr -= step
+
+        print(f"Epoch {epoch}/{epochs}")
+        print(f"Lr: {lr} \n")
 
         # Test accuracy
         accuracy = test_accuracy(1000)
         accuracies.append(accuracy)
         accuracy_gens.append(gen // n_error)
-        print(f"Accuracy: {accuracy}%")
+
+        print(f"Accuracy: {accuracy}% \n")
+
+        print(f"Train time: {round(time.time() - start_time)} seconds")
 
         # Training iterations
         for i in range(len(x_train)):
@@ -149,7 +176,7 @@ def training_loop():
             y_list[y] = 1
 
             nn.forward(x)
-            nn.update_weights(y_list, lr=0.001)
+            nn.update_weights(y_list, lr=lr)
 
             # Update metrics
             if gen % n_error == 0:
@@ -161,12 +188,13 @@ def training_loop():
                 accuracies.append(accuracy)
                 accuracy_gens.append(gen // n_error)
 
-                print(f"Accuracy: {accuracy}%")
-
         # Save weights
         np.savetxt('w1.npy', nn.w1)
         np.savetxt('w2.npy', nn.w2)
 
+        print("")
+
+    quit(0)
 
 # Start training thread
 Thread(target=training_loop, daemon=True).start()

@@ -4,7 +4,7 @@ import numpy as np
 from neuralNetwork import NeuralNetwork
 from PIL import Image
 
-nn = NeuralNetwork(784, 256, 10, load=True)
+nn = NeuralNetwork(784, 128, 10, load=True)
 
 # Initialize Pygame
 pygame.init()
