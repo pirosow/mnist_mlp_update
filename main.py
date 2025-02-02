@@ -21,13 +21,13 @@ import time
 x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
 x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
 
-epochs = 10
+epochs = 100
 
-min_lr = 0.0001
+min_lr = 0.0005
 max_lr = 0.01
 
 # Initialize neural network and data lists
-nn = NeuralNetwork(784, 128, 10, load=False)
+nn = NeuralNetwork(784, 256, 10, load=False)
 errors = []
 gens = []
 accuracies = []
@@ -61,7 +61,29 @@ fig.update_layout(
     yaxis2=dict(title='Accuracy (%)', color='red', overlaying='y', side='right'),
 )
 
-def augment_image(img_array, noise_multiplier, rotation_threshold):
+from PIL import Image
+
+
+def move_image(image, x, y, fill=0):
+    """
+    Move the image by x pixels on both the x and y axes.
+
+    Parameters:
+        image (PIL.Image.Image): The input image.
+        x (int): Number of pixels to shift along both axes.
+        fill (int/tuple): Fill color for exposed areas (default is 0, black).
+
+    Returns:
+        PIL.Image.Image: The shifted image.
+    """
+    return image.transform(
+        image.size,
+        Image.AFFINE,
+        (1, 0, -x, 0, 1, -y),
+        fillcolor=fill
+    )
+
+def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold):
     """Robust MNIST augmentation with dimension checks"""
     # Convert to 2D uint8 for processing
     if img_array.ndim == 3:
@@ -76,8 +98,10 @@ def augment_image(img_array, noise_multiplier, rotation_threshold):
 
     rotated = img.rotate(rotation, fillcolor=0)
 
+    img = move_image(rotated, random.randint(-move_threshold, move_threshold), random.randint(-move_threshold, move_threshold))
+
     # Convert back to array
-    rotated_array = np.array(rotated)
+    rotated_array = np.array(img)
 
     # Add noise and clip
     noise = np.random.normal(0, noise_multiplier, rotated_array.shape)
@@ -155,7 +179,7 @@ def training_loop():
             # In the training loop:
             original = x_train[i]
 
-            augmented = augment_image(original, 30, 50)
+            augmented = augment_image(original, 30, 50, 3)
 
             # Convert for saving
             save_array = augmented.squeeze()  # Remove channel dimension (28,28,1) -> (28,28)
