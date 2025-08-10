@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
@@ -13,6 +14,7 @@ from threading import Thread
 import random
 from PIL import Image
 import time
+import threading
 
 # Load MNIST dataset
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
@@ -21,20 +23,33 @@ import time
 x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
 x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
 
-epochs = 100
+x_test_flat = x_test.reshape(len(x_test), -1)
+x_train_flat = x_train.reshape(len(x_train), -1)
 
-min_lr = 0.0005
-max_lr = 0.01
+image_noise = 20
+rotation = 50
+move = 4
+
+epochs = 100000
+
+min_lr = 0.00000001 #0.01
+max_lr = 0.001 #0.25
+
+load = bool(input("Do you want to load the last training (y) or train from scratch (n)? (y/n)").lower() in ["y", "yes"])
 
 # Initialize neural network and data lists
-nn = NeuralNetwork(784, 256, 10, load=False)
+nn = NeuralNetwork(784, 256, 10, load=load)
 errors = []
 gens = []
-accuracies = []
+accuraciesTest = []
+accuraciesTrain = []
 accuracy_gens = []
 
-n_error = 1000
-n_accuracy = 10000
+n_error = 1
+updateStep = 25
+
+accuracyTest = 0
+accuracyTrain = 0
 
 gen = 0
 epoch = 0
@@ -48,21 +63,54 @@ app.layout = html.Div([
     dcc.Interval(id='interval-component', interval=1000, n_intervals=0)
 ])
 
-# Initialize figure with two y-axes
+# Utility: simple rolling average function
+def rolling_avg(lst, window=5):
+    out = []
+    for i in range(len(lst)):
+        window_vals = lst[max(0, i - window + 1): i + 1]
+        if len(window_vals) == 0:
+            out.append(None)
+        else:
+            out.append(float(np.mean(window_vals)))
+    return out
+
+# Initialize figure with two axes only: errors on y (primary), accuracies on y2 (secondary)
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=gens, y=errors, mode='lines', name='Error', line=dict(color='blue')))
-fig.add_trace(go.Scatter(x=accuracy_gens, y=accuracies, mode='lines', name='Accuracy',
-                         line=dict(color='red'), yaxis='y2'))
+
+# Trace 0: raw error (primary y)
+fig.add_trace(go.Scatter(x=accuracy_gens, y=errors, mode='lines', name='Error', line=dict(color='blue'), yaxis='y'))
+
+# Trace 1: avg error (last 5) on the same error axis
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Avg error (last 5)', line=dict(color='purple', width=4), yaxis='y'))
+
+# Trace 2: test accuracy (rolling avg last 5) on accuracy axis y2
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Test accuracy (avg last 5)', line=dict(color='green'), yaxis='y2'))
+
+# Trace 3: train accuracy (rolling avg last 5) on accuracy axis y2
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Train accuracy (avg last 5)', line=dict(color='yellow'), yaxis='y2'))
 
 fig.update_layout(
     title='Error and Accuracy vs Generation (Training Progress)',
     xaxis_title='Generation (k)',
-    yaxis=dict(title='Error', color='blue'),
-    yaxis2=dict(title='Accuracy (%)', color='red', overlaying='y', side='right'),
+    # Primary error axis (put on the right)
+    yaxis=dict(
+        title='Error',
+        color='blue',
+        side='left',
+    ),
+    # Single accuracy axis for both accuracy traces (also on the right, slightly further)
+    yaxis2=dict(
+        title='Accuracy (%) (avg last 5)',
+        color='green',
+        overlaying='y',
+        side='right',
+    ),
+    margin=dict(l=60, r=160, t=60, b=60),
+    legend=dict(y=0.99, x=0.01),
+    hovermode="x unified"
 )
 
 from PIL import Image
-
 
 def move_image(image, x, y, fill=0):
     """
@@ -83,33 +131,103 @@ def move_image(image, x, y, fill=0):
         fillcolor=fill
     )
 
-def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold):
-    """Robust MNIST augmentation with dimension checks"""
-    # Convert to 2D uint8 for processing
-    if img_array.ndim == 3:
-        processed = (img_array.squeeze() * 255).astype(np.uint8)
-    else:
-        processed = (img_array * 255).astype(np.uint8)
+def smooth_labels(y_onehot, eps=0.02):
+    K = y_onehot.shape[0]
 
-    # Rotate with black background
+    return y_onehot * (1.0 - eps) + eps / K
+
+
+def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold, scale_threshold=0.30):
+    """
+    Robust MNIST augmentation with optional scaling (zoom).
+
+    Parameters
+    ----------
+    img_array : np.ndarray
+        Input image, either shape (28,28) or (28,28,1), values in [0,1] or [0,255].
+    noise_multiplier : float or int
+        Max stddev for additive Gaussian noise (in pixel units 0..255). Per-sample sigma is drawn
+        from [noise_multiplier/3, noise_multiplier].
+    rotation_threshold : int
+        Max absolute degrees for random rotation. Rotation is sampled uniformly in [-rotation_threshold, rotation_threshold].
+    move_threshold : int
+        Max pixel translation in both x and y; translation is sampled uniformly in [-move_threshold, move_threshold].
+    scale_threshold : float (default 0.12)
+        Maximum relative scaling. Scale is sampled uniformly from [max(0.5, 1-scale_threshold), 1+scale_threshold].
+        For example scale_threshold=0.12 -> scale in [0.88, 1.12] (clamped at a minimum of 0.5).
+    """
+    # Normalize to uint8 28x28 greyscale
+    if img_array.ndim == 3:
+        processed = img_array.squeeze()
+    else:
+        processed = img_array
+
+    # Accept [0,1] floats or [0,255] ints
+    if processed.dtype == np.float32 or processed.dtype == np.float64:
+        processed = (processed * 255.0).astype(np.uint8)
+    else:
+        processed = processed.astype(np.uint8)
+
+    # Make PIL image
     img = Image.fromarray(processed, mode='L')
 
-    rotation = random.randint(-rotation_threshold, rotation_threshold)
+    # --- Scale (zoom) ---
+    if scale_threshold is not None and scale_threshold > 0.0:
+        low = max(0.5, 1.0 - scale_threshold)
+        high = 1.0 + scale_threshold
+        scale = random.uniform(low, high)
+    else:
+        scale = 1.0
 
-    rotated = img.rotate(rotation, fillcolor=0)
+    if abs(scale - 1.0) > 1e-6:
+        new_size = max(1, int(round(28 * scale)))
+        # resize with bilinear (reasonable for small images)
+        scaled = img.resize((new_size, new_size), resample=Image.BILINEAR)
+        # paste onto black 28x28 canvas, centered
+        canvas = Image.new('L', (28, 28), 0)
+        paste_x = (28 - new_size) // 2
+        paste_y = (28 - new_size) // 2
+        canvas.paste(scaled, (paste_x, paste_y))
+        img = canvas
 
-    img = move_image(rotated, random.randint(-move_threshold, move_threshold), random.randint(-move_threshold, move_threshold))
+    # --- Rotation ---
+    if rotation_threshold and rotation_threshold > 0:
+        rotation = random.randint(-rotation_threshold, rotation_threshold)
+        img = img.rotate(rotation, fillcolor=0)
 
-    # Convert back to array
-    rotated_array = np.array(img)
+    # --- Translation / move ---
+    if move_threshold and move_threshold > 0:
+        dx = random.randint(-move_threshold, move_threshold)
+        dy = random.randint(-move_threshold, move_threshold)
+    else:
+        dx = dy = 0
+    moved = Image.new('L', (28, 28), 0)
+    # paste accepts negative coords -> crops appropriately, leaving background black
+    moved.paste(img, (dx, dy))
+    img = moved
 
-    # Add noise and clip
-    noise = np.random.normal(0, noise_multiplier, rotated_array.shape)
-    noisy_array = rotated_array.astype(np.float32) + noise
-    noisy_array = np.clip(noisy_array, 0, 255)
+    # Convert back to numpy (uint8)
+    arr = np.array(img).astype(np.float32)
 
-    # Return normalized with channel dimension
-    return (noisy_array / 255.0).reshape(28, 28, 1)
+    # --- Noise: per-sample sigma ---
+    # allow noise_multiplier to be float; fallback to small value if <=0
+    max_sigma = float(noise_multiplier) if noise_multiplier is not None else 0.0
+    if max_sigma <= 0:
+        sigma = 0.0
+    else:
+        min_sigma = max_sigma / 3.0
+        sigma = random.uniform(min_sigma, max_sigma)
+
+    if sigma > 0:
+        noise = np.random.normal(loc=0.0, scale=sigma, size=arr.shape)
+        arr = arr + noise
+
+    arr = np.clip(arr, 0, 255)
+
+    # Return normalized to [0,1] with channel dim
+    out = (arr / 255.0).astype(np.float32).reshape(28, 28, 1)
+
+    return out
 
 
 @app.callback(
@@ -118,10 +236,29 @@ def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshol
 )
 def update_graph(n):
     global fig
-    fig.data[0].x = gens
-    fig.data[0].y = errors
-    fig.data[1].x = accuracy_gens
-    fig.data[1].y = accuracies
+
+    # convert to plain lists to avoid JSON serialization problems
+    x_vals = list(accuracy_gens)
+
+    # update raw error line (trace 0)
+    fig.data[0].x = x_vals
+    fig.data[0].y = list(errors)
+
+    # compute rolling average over last 5 errors and set trace 1
+    err_avg5 = rolling_avg(list(errors), window=5)
+    fig.data[1].x = x_vals
+    fig.data[1].y = err_avg5
+
+    # For accuracies, plot rolling average (last 5)
+    test_avg5 = rolling_avg(list(accuraciesTest), window=5)
+    train_avg5 = rolling_avg(list(accuraciesTrain), window=5)
+
+    fig.data[2].x = x_vals
+    fig.data[2].y = test_avg5
+
+    fig.data[3].x = x_vals
+    fig.data[3].y = train_avg5
+
     return fig
 
 
@@ -138,10 +275,79 @@ def test_accuracy(samples=1000):
         prediction = np.argmax(nn.forward(x))
         good += int(prediction == y)
 
-    return round((good / samples) * 10000) / 100
+    accTest = round((good / samples) * 10000) / 100
+
+    good = 0
+
+    for _ in range(samples):
+        j = random.randint(0, len(x_train) - 1)
+        original = x_train[j]
+
+        augmented = augment_image(original, image_noise, rotation, move)
+
+        # Continue training
+        x = augmented.flatten()
+
+        y = y_train[j]
+        prediction = np.argmax(nn.forward(x))
+        good += int(prediction == y)
+
+    accTrain = round((good / samples) * 10000) / 100
+
+    return accTest, accTrain
+
+def full_test():
+    rightTest = 0
+    rightTrain = 0
+
+    for i, img in enumerate(x_test):
+        x = img.flatten()
+        y = y_test[i]
+
+        pred = np.argmax(nn.forward(x))
+
+        if pred == y:
+            rightTest += 1
+
+    for i, img in enumerate(x_train):
+        x = img.flatten()
+        y = y_train[i]
+
+        pred = np.argmax(nn.forward(x))
+
+        if pred == y:
+            rightTrain += 1
+
+    testAcc = round(rightTest / len(x_test), 4) * 100
+    trainAcc = round(rightTrain / len(x_train), 4) * 100
+
+    return testAcc, trainAcc
+
+def updateStats():
+    global avg_error, accuraciesTest, accuraciesTrain, accuracy_gens, errors, lr, start_time, pil_img
+
+    accuracyTest, accuracyTrain = test_accuracy(1000)
+    accuraciesTest.append(accuracyTest)
+    accuraciesTrain.append(accuracyTrain)
+    accuracy_gens.append(gen // n_error)
+
+    errors.append(avg_error)
+
+    # Save weights
+    np.save('w1.npy', nn.w1)
+    np.save('w2.npy', nn.w2)
+
+    print(f"Test accuracy: {accuracyTest}%")
+    print(f"Train accuracy: {accuracyTrain}% \n")
+
+    pil_img.save("training_example.png")
+
+    print("")
 
 def training_loop():
-    global gen, epoch, errors, gens, accuracies, accuracy_gens
+    global gen, epoch, errors, gens, accuracies, accuracy_gens, accuracyTest, accuracyTrain, updateStep, avg_error, pil_img
+
+    batches = 64
 
     step = (max_lr - min_lr) / epochs
 
@@ -157,29 +363,50 @@ def training_loop():
 
     print(f"Max lr: {max_lr} \nMin lr: {min_lr} \n")
 
+    time.sleep(2)
+
     for epoch in range(1, epochs + 1):
         lr -= step
 
-        print(f"Epoch {epoch}/{epochs}")
-        print(f"Lr: {lr} \n")
+        gen += 1
 
-        # Test accuracy
-        accuracy = test_accuracy(1000)
-        accuracies.append(accuracy)
-        accuracy_gens.append(gen // n_error)
-
-        print(f"Accuracy: {accuracy}% \n")
-
-        print(f"Train time: {round(time.time() - start_time)} seconds")
+        indices = np.arange(len(x_train))
+        np.random.shuffle(indices)
 
         # Training iterations
-        for i in range(len(x_train)):
-            gen += 1
-
+        for i in range(batches):
             # In the training loop:
-            original = x_train[i]
+            index = indices[i]
 
-            augmented = augment_image(original, 30, 50, 3)
+            original = x_train[index]
+
+            augmented = augment_image(original, image_noise, rotation, move)
+
+            # Continue training
+            x = augmented.flatten()
+
+            # Training step
+            y = y_train[index]
+            y_list = np.zeros(10)
+            y_list[y] = 1
+
+            y_list = smooth_labels(y_list)
+
+            nn.forward(x)
+
+            nn.augment_weights(y_list)
+
+        avg_error = nn.update_weights(batches, lr=lr)
+
+        if epoch % updateStep == 0:
+            print(f"Epoch {epoch}/{epochs}")
+            print(f"Lr: {lr} \n")
+            print(f"Train time: {round(time.time() - start_time)} seconds")
+
+            t = threading.Thread(target=updateStats)
+            t.daemon = True
+
+            t.start()
 
             # Convert for saving
             save_array = augmented.squeeze()  # Remove channel dimension (28,28,1) -> (28,28)
@@ -191,33 +418,6 @@ def training_loop():
             else:  # Handle rare cases with unexpected dimensions
                 pil_img = Image.fromarray(save_array[:, :, 0], mode='L')
 
-            # Continue training
-            x = augmented.flatten()
-
-            # Training step
-            y = y_train[i]
-            y_list = [0] * 10
-            y_list[y] = 1
-
-            nn.forward(x)
-            nn.update_weights(y_list, lr=lr)
-
-            # Update metrics
-            if gen % n_error == 0:
-                errors.append(nn.error)
-                gens.append(gen // n_error)
-
-            if gen % n_accuracy == 0:
-                accuracy = test_accuracy(1000)
-                accuracies.append(accuracy)
-                accuracy_gens.append(gen // n_error)
-
-        # Save weights
-        np.savetxt('w1.npy', nn.w1)
-        np.savetxt('w2.npy', nn.w2)
-
-        print("")
-
     quit(0)
 
 # Start training thread
@@ -225,4 +425,4 @@ Thread(target=training_loop, daemon=True).start()
 
 # Run server
 if __name__ == '__main__':
-    app.run_server(debug=True, use_reloader=False)
+    app.run(debug=True, use_reloader=False)
