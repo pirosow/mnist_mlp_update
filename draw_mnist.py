@@ -21,14 +21,14 @@ AUTO_PREDICT_INTERVAL = 0.12  # seconds
 # ------------------------
 # Initialize network
 # ------------------------
-nn = NeuralNetwork(784, 256, 10, load=True)
+nn = NeuralNetwork(784, 1024, 10, load=True)
 
 # ------------------------
 # Pygame init
 # ------------------------
 pygame.init()
 screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-pygame.display.set_caption("MNIST Drawer — beautiful")
+pygame.display.set_caption("Test my neural network!")
 clock = pygame.time.Clock()
 
 # Fonts
@@ -53,23 +53,18 @@ BUTTON_TEXT = (20, 20, 20)
 # Canvas data
 # ------------------------
 canvas = np.zeros((CANVAS_PIXELS, CANVAS_PIXELS), dtype=np.float32)  # 0..1
-brush_radius = 2.6
+brush_radius = 2.4
 brush_strength = 0.26
 is_drawing = False
 last_pos = None
 
-# UI geometry
-# Move buttons farther down so they don't overlap the title
 clear_btn_rect = pygame.Rect(DISPLAY_SIZE + 20, 54, SIDEBAR_WIDTH - 40, 38)
 save_btn_rect = pygame.Rect(DISPLAY_SIZE + 20, 100, SIDEBAR_WIDTH - 40, 32)
 
-# State
 last_forward_time = 0
 predictions = np.zeros(10, dtype=np.float32)
 auto_predict = True
 show_grid = False
-
-# Helpers
 
 def apply_brush(x, y, radius=None, strength=None):
     """Apply a soft circular brush to the normalized canvas array.
@@ -113,7 +108,6 @@ def draw_line(p0, p1):
 
 
 def canvas_to_image_array():
-    # Make a 28x28 grayscale image in the same orientation expected by the network
     arr = (canvas.T * 255).astype(np.uint8)
     img = Image.fromarray(arr)
     img = img.rotate(-90)
@@ -135,9 +129,6 @@ def predict_once():
         predictions = probs
     except Exception as e:
         print("Prediction error:", e)
-
-
-# UI drawing (only sidebar / controls)
 
 def draw_sidebar():
     # sidebar background
@@ -176,7 +167,6 @@ def draw_sidebar():
 
     top_digit = int(np.argmax(predictions)) if predictions.sum() > 0 else None
 
-    # ensure we don't overflow; allow up to 10 bars with spacing
     for i in range(10):
         y = bar_y + i * 26
         # label
@@ -193,7 +183,6 @@ def draw_sidebar():
         pct_surf = SMALL_FONT.render(pct, True, WHITE)
         screen.blit(pct_surf, (bar_x + 28 + max_bar_w + 8, y))
 
-    # big predicted digit and confidence at the bottom-right area (kept above preview)
     if top_digit is not None:
         big = TITLE_FONT.render(f"Top: {top_digit}", True, ACCENT)
         screen.blit(big, (DISPLAY_SIZE + 20, WINDOW_HEIGHT - 85))
@@ -207,8 +196,8 @@ def draw_sidebar():
     preview_surf = pygame.transform.scale(preview_surf, (psize, psize))
     preview_x = DISPLAY_SIZE + SIDEBAR_WIDTH - 20 - psize
     preview_y = WINDOW_HEIGHT - 20 - psize
-    screen.blit(SMALL_FONT.render("Preview (28x28)", True, LIGHT), (preview_x, preview_y - 18))
-    screen.blit(preview_surf, (preview_x, preview_y))
+    #screen.blit(SMALL_FONT.render("Preview (28x28)", True, LIGHT), (preview_x, preview_y - 18))
+    #screen.blit(preview_surf, (preview_x, preview_y))
 
 
 # Main loop

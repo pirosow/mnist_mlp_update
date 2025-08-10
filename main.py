@@ -15,6 +15,11 @@ import random
 from PIL import Image
 import time
 import threading
+import logging
+import sys
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 # Load MNIST dataset
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
@@ -32,13 +37,13 @@ move = 4
 
 epochs = 100000
 
-min_lr = 0.00000001 #0.01
+min_lr = 0.000001 #0.01
 max_lr = 0.001 #0.25
 
 load = bool(input("Do you want to load the last training (y) or train from scratch (n)? (y/n)").lower() in ["y", "yes"])
 
 # Initialize neural network and data lists
-nn = NeuralNetwork(784, 256, 10, load=load)
+nn = NeuralNetwork(784, 1024, 10, load=load)
 errors = []
 gens = []
 accuraciesTest = []
@@ -338,11 +343,7 @@ def updateStats():
     np.save('w2.npy', nn.w2)
 
     print(f"Test accuracy: {accuracyTest}%")
-    print(f"Train accuracy: {accuracyTrain}% \n")
-
-    pil_img.save("training_example.png")
-
-    print("")
+    print(f"Train accuracy: {accuracyTrain}%")
 
 def training_loop():
     global gen, epoch, errors, gens, accuracies, accuracy_gens, accuracyTest, accuracyTrain, updateStep, avg_error, pil_img
@@ -399,14 +400,13 @@ def training_loop():
         avg_error = nn.update_weights(batches, lr=lr)
 
         if epoch % updateStep == 0:
+            print("\n\n\n\n\n")
+
             print(f"Epoch {epoch}/{epochs}")
             print(f"Lr: {lr} \n")
             print(f"Train time: {round(time.time() - start_time)} seconds")
 
-            t = threading.Thread(target=updateStats)
-            t.daemon = True
-
-            t.start()
+            updateStats()
 
             # Convert for saving
             save_array = augmented.squeeze()  # Remove channel dimension (28,28,1) -> (28,28)
@@ -418,6 +418,8 @@ def training_loop():
             else:  # Handle rare cases with unexpected dimensions
                 pil_img = Image.fromarray(save_array[:, :, 0], mode='L')
 
+            pil_img.save("training_example.png")
+
     quit(0)
 
 # Start training thread
@@ -425,4 +427,4 @@ Thread(target=training_loop, daemon=True).start()
 
 # Run server
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)

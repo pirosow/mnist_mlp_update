@@ -2,8 +2,8 @@ import numpy as np
 
 class NeuralNetwork:
     def __init__(self, input_size, hidden_size, output_size, load=False):
-        self.w1 = np.random.uniform(-1, 1, size=(hidden_size, input_size))
-        self.w2 = np.random.uniform(-1, 1, size=(output_size, hidden_size))
+        self.w1 = (np.random.randn(hidden_size, input_size).astype(np.float32) * np.sqrt(2.0 / input_size))
+        self.w2 = (np.random.randn(output_size, hidden_size).astype(np.float32) * np.sqrt(2.0 / hidden_size))
 
         if load:
             print("loading...")
@@ -15,8 +15,8 @@ class NeuralNetwork:
             except:
                 raise("Could not load network weights.")
 
-        self.b1 = np.random.uniform(-1, 1, size=(hidden_size, 1))
-        self.b2 = np.random.uniform(-1, 1, size=(output_size, 1))
+        self.b1 = np.zeros((hidden_size, 1)).astype(np.float32)
+        self.b2 = np.zeros((output_size, 1)).astype(np.float32)
 
         self.batch = 0
 
@@ -34,15 +34,15 @@ class NeuralNetwork:
 
         self.error = 0
 
-        self.adam_m1 = np.zeros_like(self.w1)
-        self.adam_m2 = np.zeros_like(self.w2)
-        self.adam_mb1 = np.zeros_like(self.b1)
-        self.adam_mb2 = np.zeros_like(self.b2)
+        self.adam_m1 = np.zeros_like(self.w1).astype(np.float32)
+        self.adam_m2 = np.zeros_like(self.w2).astype(np.float32)
+        self.adam_mb1 = np.zeros_like(self.b1).astype(np.float32)
+        self.adam_mb2 = np.zeros_like(self.b2).astype(np.float32)
 
-        self.adam_v1 = np.zeros_like(self.w1)
-        self.adam_v2 = np.zeros_like(self.w2)
-        self.adam_vb1 = np.zeros_like(self.b1)
-        self.adam_vb2 = np.zeros_like(self.b2)
+        self.adam_v1 = np.zeros_like(self.w1).astype(np.float32)
+        self.adam_v2 = np.zeros_like(self.w2).astype(np.float32)
+        self.adam_vb1 = np.zeros_like(self.b1).astype(np.float32)
+        self.adam_vb2 = np.zeros_like(self.b2).astype(np.float32)
 
         self.adam_t1 = 0
         self.adam_t2 = 0
@@ -145,10 +145,10 @@ class NeuralNetwork:
             self.gradientb1 += gradientb1
 
         else:
-            self.gradients2 = gradients2
-            self.gradients1 = gradients1
-            self.gradientb2 = gradientb2
-            self.gradientb1 = gradientb1
+            self.gradients2 = gradients2.astype(np.float32)
+            self.gradients1 = gradients1.astype(np.float32)
+            self.gradientb2 = gradientb2.astype(np.float32)
+            self.gradientb1 = gradientb1.astype(np.float32)
 
     def update_weights(self, batches, lr=0.01, weight_decay=1e-4):
         """
@@ -167,13 +167,11 @@ class NeuralNetwork:
         gradientb1, mb1, vb1, tb1 = self.adam_optimize(self.gradientb1 / batches, self.adam_mb1, self.adam_vb1,
                                                        self.adam_tb1)
 
-        # store optimizer state back
         self.adam_m2, self.adam_v2, self.adam_t2 = m2, v2, t2
         self.adam_m1, self.adam_v1, self.adam_t1 = m1, v1, t1
         self.adam_mb2, self.adam_vb2, self.adam_tb2 = mb2, vb2, tb2
         self.adam_mb1, self.adam_vb1, self.adam_tb1 = mb1, vb1, tb1
 
-        # Standard parameter update (Adam step)
         self.w2 -= lr * gradients2
         self.w1 -= lr * gradients1
         self.b2 -= lr * gradientb2
@@ -190,7 +188,6 @@ class NeuralNetwork:
             self.w1 *= decay_factor
             # NOTE: biases b1,b2 usually not decayed
 
-        # clear accumulators (same as before)
         self.gradients2 = None
         self.gradients1 = None
         self.gradientb2 = None
