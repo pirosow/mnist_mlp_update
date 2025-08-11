@@ -17,6 +17,7 @@ import time
 import threading
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -35,9 +36,10 @@ image_noise = 20
 rotation = 50
 move = 4
 
-epochs = 100000
+epochs = 10
+batch_size = 64
 
-min_lr = 0.000001 #0.01
+min_lr = 0.00001 #0.01
 max_lr = 0.001 #0.25
 
 load = bool(input("Do you want to load the last training (y) or train from scratch (n)? (y/n)").lower() in ["y", "yes"])
@@ -140,6 +142,14 @@ def smooth_labels(y_onehot, eps=0.02):
     K = y_onehot.shape[0]
 
     return y_onehot * (1.0 - eps) + eps / K
+
+def onehot_batch(mini_set):
+    batch = np.zeros((10, len(mini_set)), dtype=np.float32)
+
+    for j, idx in enumerate(mini_set):
+        batch[y_train[idx], j] = 1.0
+
+    return smooth_labels(batch)   # implement smoothing to work on arrays
 
 
 def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold, scale_threshold=0.30):
@@ -328,27 +338,55 @@ def full_test():
 
     return testAcc, trainAcc
 
-def updateStats():
-    global avg_error, accuraciesTest, accuraciesTrain, accuracy_gens, errors, lr, start_time, pil_img
+def augmented(mini_set):
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        imgs = list(ex.map(lambda i: augment_image(x_train[i], image_noise, rotation, move), mini_set))
+    # stack into (784, batch)
+    x = np.stack([img.flatten() for img in imgs], axis=1).astype(np.float32)
+
+    return x
+
+def updateStats(gen):
+    global avg_error, accuraciesTest, accuraciesTrain, accuracy_gens, errors, batch_size
 
     accuracyTest, accuracyTrain = test_accuracy(1000)
     accuraciesTest.append(accuracyTest)
     accuraciesTrain.append(accuracyTrain)
-    accuracy_gens.append(gen // n_error)
+    accuracy_gens.append(gen)
 
     errors.append(avg_error)
 
     # Save weights
-    np.save('w1.npy', nn.w1)
-    np.save('w2.npy', nn.w2)
+    np.savez('network.npz', w1=nn.w1, w2=nn.w2, b1=nn.b1, b2=nn.b2)
 
     print(f"Test accuracy: {accuracyTest}%")
     print(f"Train accuracy: {accuracyTrain}%")
 
-def training_loop():
-    global gen, epoch, errors, gens, accuracies, accuracy_gens, accuracyTest, accuracyTrain, updateStep, avg_error, pil_img
+def update(generation, epoch, epochs, start_time, x, lr, batch, gen):
+    print("\n\n\n\n\n")
 
-    batches = 64
+    print(f"Epoch {epoch}/{epochs}")
+    print(f"Generation {generation}")
+    print(f"Image {batch}/{len(x_train)}")
+    print(f"Lr: {lr} \n")
+    print(f"Train time: {round(time.time() - start_time)} seconds")
+
+    updateStats(gen)
+
+    # Convert for saving
+    save_array = x.reshape(28, 28)  # Remove channel dimension (28,28,1) -> (28,28)
+    save_array = (save_array * 255).astype(np.uint8)  # Convert to 0-255
+
+    # Ensure array is 2D and create proper PIL Image
+    if save_array.ndim == 2:
+        pil_img = Image.fromarray(save_array, mode='L')  # Explicit grayscale mode
+    else:  # Handle rare cases with unexpected dimensions
+        pil_img = Image.fromarray(save_array[:, :, 0], mode='L')
+
+    pil_img.save("training_example.png")
+
+def training_loop():
+    global gen, epoch, errors, gens, updateStep, avg_error
 
     step = (max_lr - min_lr) / epochs
 
@@ -366,59 +404,37 @@ def training_loop():
 
     time.sleep(2)
 
+    indices = np.arange(len(x_train))
+
+    generation = 0
+
     for epoch in range(1, epochs + 1):
         lr -= step
 
-        gen += 1
-
-        indices = np.arange(len(x_train))
         np.random.shuffle(indices)
 
-        # Training iterations
-        for i in range(batches):
-            # In the training loop:
-            index = indices[i]
+        for batch in range(0, len(x_train), batch_size):
+            generation += 1
 
-            original = x_train[index]
+            mini_set = indices[batch:batch + batch_size]
 
-            augmented = augment_image(original, image_noise, rotation, move)
+            X = augmented(mini_set).T
+            Y = onehot_batch(mini_set).T
 
-            # Continue training
-            x = augmented.flatten()
+            # Training iterations
+            for j in range(len(mini_set)):
+                x = X[j]
 
-            # Training step
-            y = y_train[index]
-            y_list = np.zeros(10)
-            y_list[y] = 1
+                y = Y[j]
 
-            y_list = smooth_labels(y_list)
+                nn.forward(x)
 
-            nn.forward(x)
+                nn.augment_weights(y)
 
-            nn.augment_weights(y_list)
+            avg_error = nn.update_weights(len(mini_set), lr=lr)
 
-        avg_error = nn.update_weights(batches, lr=lr)
-
-        if epoch % updateStep == 0:
-            print("\n\n\n\n\n")
-
-            print(f"Epoch {epoch}/{epochs}")
-            print(f"Lr: {lr} \n")
-            print(f"Train time: {round(time.time() - start_time)} seconds")
-
-            updateStats()
-
-            # Convert for saving
-            save_array = augmented.squeeze()  # Remove channel dimension (28,28,1) -> (28,28)
-            save_array = (save_array * 255).astype(np.uint8)  # Convert to 0-255
-
-            # Ensure array is 2D and create proper PIL Image
-            if save_array.ndim == 2:
-                pil_img = Image.fromarray(save_array, mode='L')  # Explicit grayscale mode
-            else:  # Handle rare cases with unexpected dimensions
-                pil_img = Image.fromarray(save_array[:, :, 0], mode='L')
-
-            pil_img.save("training_example.png")
+            if generation % updateStep == 0:
+                Thread(update(generation, epoch, epochs, start_time, x, lr, batch, generation), daemon=True).start()
 
     quit(0)
 

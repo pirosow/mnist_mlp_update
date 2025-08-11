@@ -5,18 +5,23 @@ class NeuralNetwork:
         self.w1 = (np.random.randn(hidden_size, input_size).astype(np.float32) * np.sqrt(2.0 / input_size))
         self.w2 = (np.random.randn(output_size, hidden_size).astype(np.float32) * np.sqrt(2.0 / hidden_size))
 
+        self.b1 = np.zeros((hidden_size, 1)).astype(np.float32)
+        self.b2 = np.zeros((output_size, 1)).astype(np.float32)
+
         if load:
             print("loading...")
 
             try:
-                self.w1 = np.load('w1.npy')
-                self.w2 = np.load('w2.npy')
+                data = np.load("network.npz")
+
+                self.w1 = data["w1"]
+                self.w2 = data["w2"]
+
+                self.b1 = data["b1"]
+                self.b2 = data["b2"]
 
             except:
                 raise("Could not load network weights.")
-
-        self.b1 = np.zeros((hidden_size, 1)).astype(np.float32)
-        self.b2 = np.zeros((output_size, 1)).astype(np.float32)
 
         self.batch = 0
 
