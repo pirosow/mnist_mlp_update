@@ -1,8 +1,4 @@
 import os
-from copy import deepcopy
-
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
 from neuralNetwork import NeuralNetwork
 import numpy as np
 from tensorflow.keras.datasets import mnist
@@ -14,10 +10,14 @@ from threading import Thread
 import random
 from PIL import Image
 import time
-import threading
 import logging
-import sys
 from concurrent.futures import ThreadPoolExecutor
+
+epochs = 250
+batch_size = 256
+
+min_lr = 0.000001 #0.01
+max_lr = 0.001 #0.25
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -35,12 +35,6 @@ x_train_flat = x_train.reshape(len(x_train), -1)
 image_noise = 20
 rotation = 50
 move = 4
-
-epochs = 10
-batch_size = 64
-
-min_lr = 0.00001 #0.01
-max_lr = 0.001 #0.25
 
 load = bool(input("Do you want to load the last training (y) or train from scratch (n)? (y/n)").lower() in ["y", "yes"])
 
@@ -117,8 +111,6 @@ fig.update_layout(
     hovermode="x unified"
 )
 
-from PIL import Image
-
 def move_image(image, x, y, fill=0):
     """
     Move the image by x pixels on both the x and y axes.
@@ -143,34 +135,21 @@ def smooth_labels(y_onehot, eps=0.02):
 
     return y_onehot * (1.0 - eps) + eps / K
 
-def onehot_batch(mini_set):
+def onehot_batch(mini_set, training=True):
     batch = np.zeros((10, len(mini_set)), dtype=np.float32)
 
-    for j, idx in enumerate(mini_set):
-        batch[y_train[idx], j] = 1.0
+    if training:
+        for j, idx in enumerate(mini_set):
+            batch[y_train[idx], j] = 1.0
+
+    else:
+        for j, idx in enumerate(mini_set):
+            batch[y_test[idx], j] = 1.0
 
     return smooth_labels(batch)   # implement smoothing to work on arrays
 
 
 def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold, scale_threshold=0.30):
-    """
-    Robust MNIST augmentation with optional scaling (zoom).
-
-    Parameters
-    ----------
-    img_array : np.ndarray
-        Input image, either shape (28,28) or (28,28,1), values in [0,1] or [0,255].
-    noise_multiplier : float or int
-        Max stddev for additive Gaussian noise (in pixel units 0..255). Per-sample sigma is drawn
-        from [noise_multiplier/3, noise_multiplier].
-    rotation_threshold : int
-        Max absolute degrees for random rotation. Rotation is sampled uniformly in [-rotation_threshold, rotation_threshold].
-    move_threshold : int
-        Max pixel translation in both x and y; translation is sampled uniformly in [-move_threshold, move_threshold].
-    scale_threshold : float (default 0.12)
-        Maximum relative scaling. Scale is sampled uniformly from [max(0.5, 1-scale_threshold), 1+scale_threshold].
-        For example scale_threshold=0.12 -> scale in [0.88, 1.12] (clamped at a minimum of 0.5).
-    """
     # Normalize to uint8 28x28 greyscale
     if img_array.ndim == 3:
         processed = img_array.squeeze()
@@ -277,39 +256,79 @@ def update_graph(n):
     return fig
 
 
-def test_accuracy(samples=1000):
+import numpy as np
+import random
+
+def test_accuracy(samples=1000, batch_size=256):
+    # --- Test set ---
     good = 0
+    n_test = len(x_test)
+    samples_test = min(samples, n_test)
 
-    for _ in range(samples):
-        j = random.randint(0, len(x_test) - 1)
-        x = x_test[j].flatten()
+    # random indices for test
+    idxs = np.random.randint(0, n_test, size=samples_test)
 
-        #x = augment_image(x, 30, 50).flatten()
+    # process in minibatches
+    for start in range(0, samples_test, batch_size):
+        end = min(start + batch_size, samples_test)
+        batch_idxs = idxs[start:end]
 
-        y = y_test[j]
-        prediction = np.argmax(nn.forward(x))
-        good += int(prediction == y)
+        # build batch X of shape (B, D)
+        X_batch = np.stack([np.asarray(x_test[i]).flatten() for i in batch_idxs], axis=0).astype(np.float32)
 
-    accTest = round((good / samples) * 10000) / 100
+        # forward once for the whole batch
+        out = nn.forward(X_batch)
+        out = np.asarray(out)
 
+        # get predictions: supports (B, C) or (C,) single-sample shape
+        if out.ndim == 2:
+            preds = np.argmax(out, axis=1)
+        else:
+            preds = np.argmax(out, axis=0)  # fallback
+
+        # true labels
+        trues = np.array([y_test[i] for i in batch_idxs])
+
+        good += int(np.sum(preds == trues))
+
+    accTest = round((good / samples_test) * 10000) / 100
+
+    # --- Train set (with augmentation) ---
     good = 0
+    n_train = len(x_train)
+    samples_train = min(samples, n_train)
 
-    for _ in range(samples):
-        j = random.randint(0, len(x_train) - 1)
-        original = x_train[j]
+    idxs = np.random.randint(0, n_train, size=samples_train)
 
-        augmented = augment_image(original, image_noise, rotation, move)
+    for start in range(0, samples_train, batch_size):
+        end = min(start + batch_size, samples_train)
+        batch_idxs = idxs[start:end]
 
-        # Continue training
-        x = augmented.flatten()
+        # apply augmentation per-sample but batch before forward
+        batch_imgs = []
+        for i in batch_idxs:
+            original = x_train[i]
+            augmented = augment_image(original, image_noise, rotation, move)  # your augment params
+            batch_imgs.append(np.asarray(augmented).flatten())
 
-        y = y_train[j]
-        prediction = np.argmax(nn.forward(x))
-        good += int(prediction == y)
+        X_batch = np.stack(batch_imgs, axis=0).astype(np.float32)
 
-    accTrain = round((good / samples) * 10000) / 100
+        out = nn.forward(X_batch)
+        out = np.asarray(out)
+        if out.ndim == 2:
+            preds = np.argmax(out, axis=1)
+        else:
+            preds = np.argmax(out, axis=0)
+
+        trues = np.array([y_train[i] for i in batch_idxs])
+
+        good += int(np.sum(preds == trues))
+
+    accTrain = round((good / samples_train) * 10000) / 100
 
     return accTest, accTrain
+
+
 
 def full_test():
     rightTest = 0
@@ -338,9 +357,13 @@ def full_test():
 
     return testAcc, trainAcc
 
-def augmented(mini_set):
+def augmented(mini_set, training=True):
     with ThreadPoolExecutor(max_workers=8) as ex:
-        imgs = list(ex.map(lambda i: augment_image(x_train[i], image_noise, rotation, move), mini_set))
+        if training:
+            imgs = list(ex.map(lambda i: augment_image(x_train[i], image_noise, rotation, move), mini_set))
+
+        else:
+            imgs = list(ex.map(lambda i: augment_image(x_test[i], image_noise, rotation, move), mini_set))
     # stack into (784, batch)
     x = np.stack([img.flatten() for img in imgs], axis=1).astype(np.float32)
 
@@ -363,7 +386,7 @@ def updateStats(gen):
     print(f"Train accuracy: {accuracyTrain}%")
 
 def update(generation, epoch, epochs, start_time, x, lr, batch, gen):
-    print("\n\n\n\n\n")
+    print("\033c", end="")
 
     print(f"Epoch {epoch}/{epochs}")
     print(f"Generation {generation}")
@@ -374,7 +397,7 @@ def update(generation, epoch, epochs, start_time, x, lr, batch, gen):
     updateStats(gen)
 
     # Convert for saving
-    save_array = x.reshape(28, 28)  # Remove channel dimension (28,28,1) -> (28,28)
+    save_array = x[0].reshape(28, 28)  # Remove channel dimension (28,28,1) -> (28,28)
     save_array = (save_array * 255).astype(np.uint8)  # Convert to 0-255
 
     # Ensure array is 2D and create proper PIL Image
@@ -421,20 +444,14 @@ def training_loop():
             X = augmented(mini_set).T
             Y = onehot_batch(mini_set).T
 
-            # Training iterations
-            for j in range(len(mini_set)):
-                x = X[j]
+            nn.forward(X)
 
-                y = Y[j]
-
-                nn.forward(x)
-
-                nn.augment_weights(y)
+            nn.augment_weights(Y)
 
             avg_error = nn.update_weights(len(mini_set), lr=lr)
 
             if generation % updateStep == 0:
-                Thread(update(generation, epoch, epochs, start_time, x, lr, batch, generation), daemon=True).start()
+                Thread(update(generation, epoch, epochs, start_time, X, lr, batch, generation), daemon=True).start()
 
     quit(0)
 

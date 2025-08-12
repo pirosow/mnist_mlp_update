@@ -5,8 +5,8 @@ class NeuralNetwork:
         self.w1 = (np.random.randn(hidden_size, input_size).astype(np.float32) * np.sqrt(2.0 / input_size))
         self.w2 = (np.random.randn(output_size, hidden_size).astype(np.float32) * np.sqrt(2.0 / hidden_size))
 
-        self.b1 = np.zeros((hidden_size, 1)).astype(np.float32)
-        self.b2 = np.zeros((output_size, 1)).astype(np.float32)
+        self.b1 = np.zeros((hidden_size)).astype(np.float32)
+        self.b2 = np.zeros((output_size)).astype(np.float32)
 
         if load:
             print("loading...")
@@ -66,10 +66,11 @@ class NeuralNetwork:
     def sigmoid_derivative(self, x):
         return x * (1 - x)
 
-    def softmax(self, x):
-        """Compute softmax values for each sets of scores in x."""
-        e_x = np.exp(x - np.max(x))
-        return e_x / e_x.sum(axis=0)  # only difference
+    def softmax(self, z):
+        # z: (B, C)
+        z = z - np.max(z, axis=1, keepdims=True)  # numeric stability
+        exp_z = np.exp(z)
+        return exp_z / np.sum(exp_z, axis=1, keepdims=True)
 
     def cross_entropy(self, y_pred, y_true):
         return -np.sum(y_true * np.log(y_pred + 1e-8))  # Add epsilon to avoid log(0)
@@ -92,40 +93,79 @@ class NeuralNetwork:
         return np.mean(derivative)
 
     def forward(self, x):
+        x = np.asarray(x)
+
+        if x.ndim == 1:
+            x = x.reshape(1, -1)  # (1, D)
+        # optional: if user accidentally passes (D, B) transpose:
+        if x.ndim == 2 and x.shape[1] != self.w1.shape[1] and x.shape[0] == self.w1.shape[1]:
+            x = x.T
+
         self.x = x
 
-        self.z1 = np.dot(self.w1, x) + self.b1.reshape(1, -1)
-        self.a1 = self.relu(self.z1[0])
+        self.z1 = np.dot(x, self.w1.T) + self.b1.reshape(1, -1)
+        self.a1 = self.relu(self.z1)
 
-        self.z2 = np.dot(self.w2, self.a1) + self.b2.reshape(1, -1)
-        self.a2 = self.softmax(self.z2[0])
+        self.z2 = np.dot(self.a1, self.w2.T) + self.b2.reshape(1, -1)
+        self.a2 = self.softmax(self.z2)
 
         return self.a2
 
     def calculate_gradients(self, y_true):
-        error_derivative = self.cross_entropy_derivative(self.a2, y_true)  # Use CE derivative
-        activation_derivative = 1  # Softmax derivative is handled in CE
+        """
+        Vectorized gradients for a batch.
+        Assumes:
+          - self.x shape (N, D)
+          - self.a1 shape (N, H)
+          - self.a2 shape (N, C)
+          - self.z1 shape (N, H)
+          - self.w2 shape (C, H)
+          - y_true either:
+              * shape (N,) with class indices, or
+              * shape (N, C) one-hot
+        Returns:
+          grads2 (C,H), grads1 (H,D), gradb2 (C,), gradb1 (H,)
+        """
 
-        delta2 = error_derivative * activation_derivative
+        x = self.x  # (N, D)
+        a1 = self.a1  # (N, H)
+        a2 = self.a2  # (N, C)
+        N = x.shape[0]
 
-        delta2 = delta2.reshape(len(self.w2), 1)
+        # --- convert labels to one-hot if needed ---
+        y = np.asarray(y_true)
+        if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
+            # integer class labels
+            labels = y.reshape(-1)
+            y_onehot = np.zeros_like(a2)
+            y_onehot[np.arange(N), labels] = 1.0
+        else:
+            y_onehot = y.reshape(N, -1)  # assume already one-hot (N, C)
 
-        self.a1 = self.a1.reshape(len(self.w1), 1)
+        # --- delta on output (softmax + CE) ---
+        # use averaged gradient across batch (divide by N)
+        delta2 = (a2 - y_onehot) / N  # (N, C)
 
-        gradients2 = np.dot(delta2, self.a1.T)
-        gradientb2 = delta2
+        # grads for w2 and b2
+        # w2 has shape (C, H) so gradient is delta2^T @ a1 -> (C, H)
+        gradients2 = delta2.T.dot(a1)  # (C, H)
+        gradientb2 = np.sum(delta2, axis=0)  # (C,)
 
-        delta1 = np.dot(self.w2.T, delta2)
+        # backprop into hidden layer
+        # delta1 shape (N, H): delta2 @ w2 -> (N, H)
+        delta1 = delta2.dot(self.w2)  # (N, H)
+        # multiply by ReLU derivative (shape (N,H))
+        delta1 = delta1 * self.relu_derivative(self.z1)
 
-        sum_derivative = self.relu_derivative(self.z1)
-        delta1 = delta1 * sum_derivative.reshape(len(self.w1), 1)
+        # grads for w1 and b1
+        gradients1 = delta1.T.dot(x)  # (H, D)
+        gradientb1 = np.sum(delta1, axis=0)  # (H,)
 
-        delta1 = delta1.reshape(-1, 1)
-
-        gradients1 = np.dot(delta1, self.x.reshape(1, -1))
-        gradientb1 = delta1
-
-        return gradients2, gradients1, gradientb2, gradientb1
+        # keep dtype consistent with optimizer
+        return (gradients2.astype(np.float32),
+                gradients1.astype(np.float32),
+                gradientb2.astype(np.float32),
+                gradientb1.astype(np.float32))
 
     def adam_optimize(self, grads, m, v, t, beta1=0.9, beta2=0.999, eps=1e-8):
         m = beta1 * m + (1 - beta1) * grads

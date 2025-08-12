@@ -42,7 +42,7 @@ DTYPE_BYTES = 4  # float32
 
 # Visualizer settings
 RUN_VISUALIZE = True
-W_PATHS = ['w1.npy', 'w2.npy']   # list of .npy files in order of layers (W shape = (out, in))
+W_PATH = "network.npz"   # list of .npy files in order of layers (W shape = (out, in))
 MAX_LINES = 2000000               # maximum number of connection lines to draw
 PICK_TOP = 20000                # if set (int), draw only top-K absolute weights across all edges
 NODE_SIZE = 18
@@ -51,7 +51,7 @@ SAVE_PNG = True
 PNG_PATH = 'weights_viz.png'
 
 # Reduction options: None / 'pool' / 'kmeans'
-REDUCTION_METHOD = 'kmeans'   # 'pool', 'kmeans', or None
+REDUCTION_METHOD = 'pool'   # 'pool', 'kmeans', or None
 # Target sizes for reduced layers (list length = number of layers including input & output after reduction)
 # If None, automatic targets are chosen (e.g. cap hidden layers to 150 nodes)
 REDUCTION_TARGETS = None
@@ -408,18 +408,15 @@ def main():
 
     # Visualizer
     if RUN_VISUALIZE:
-        if not W_PATHS or len(W_PATHS) == 0:
+        if not W_PATH:
             print("Visualization skipped: set W_PATHS to your .npy weight files.")
             return
 
-        weights_list = []
-        for p in W_PATHS:
-            print(f"Loading {p} ...")
-            W = np.load(p)
-            if W.ndim != 2:
-                raise ValueError(f"Expected 2D matrix in {p}, got shape {W.shape}")
-            weights_list.append(W)
-            print("  shape:", W.shape)
+        print(f"Loading weights...")
+
+        weights = np.load(W_PATH)
+
+        weights_list = [weights["w1"], weights["w2"]]
 
         if REDUCTION_METHOD is None:
             reduced = weights_list
