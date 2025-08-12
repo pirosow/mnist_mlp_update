@@ -1,17 +1,17 @@
-import os
+print("Loading...")
+
 from neuralNetwork import NeuralNetwork
 import numpy as np
-from tensorflow.keras.datasets import mnist
 import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objects as go
 from threading import Thread
-import random
 from PIL import Image
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import math
 
 epochs = 250
 batch_size = 256
@@ -19,15 +19,33 @@ batch_size = 256
 min_lr = 0.000001 #0.01
 max_lr = 0.001 #0.25
 
+patience = 5
+
+overfitting = 0
+
+best_valid_loss = math.inf
+last_valid_loss = math.inf
+last_train_loss = math.inf
+
+updateStep = 100
+
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 # Load MNIST dataset
-(x_train, y_train), (x_test, y_test) = mnist.load_data()
+mnist = np.load("mnist/mnist.npz")
+
+x_train, y_train = mnist['x_train'], mnist['y_train']
+x_test,  y_test  = mnist['x_test'],  mnist['y_test']
 
 # Reshape and normalize
 x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
 x_test = x_test.reshape(-1, 28, 28, 1) / 255.0
+
+x_valid = x_train[:10000]
+y_valid = y_train[:10000]
+x_train = x_train[10000:]
+y_train = y_train[10000:]
 
 x_test_flat = x_test.reshape(len(x_test), -1)
 x_train_flat = x_train.reshape(len(x_train), -1)
@@ -36,18 +54,18 @@ image_noise = 20
 rotation = 50
 move = 4
 
-load = bool(input("Do you want to load the last training (y) or train from scratch (n)? (y/n)").lower() in ["y", "yes"])
+load = not bool(input("Do you want to train from scratch (y) or load the last training (n)? (y/n): ").lower() in ["y", "yes"])
 
 # Initialize neural network and data lists
 nn = NeuralNetwork(784, 1024, 10, load=load)
-errors = []
 gens = []
 accuraciesTest = []
 accuraciesTrain = []
 accuracy_gens = []
+testLosses = []
+trainLosses = []
 
 n_error = 1
-updateStep = 25
 
 accuracyTest = 0
 accuracyTrain = 0
@@ -77,35 +95,28 @@ def rolling_avg(lst, window=5):
 
 # Initialize figure with two axes only: errors on y (primary), accuracies on y2 (secondary)
 fig = go.Figure()
-
-# Trace 0: raw error (primary y)
-fig.add_trace(go.Scatter(x=accuracy_gens, y=errors, mode='lines', name='Error', line=dict(color='blue'), yaxis='y'))
-
-# Trace 1: avg error (last 5) on the same error axis
-fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Avg error (last 5)', line=dict(color='purple', width=4), yaxis='y'))
-
-# Trace 2: test accuracy (rolling avg last 5) on accuracy axis y2
-fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Test accuracy (avg last 5)', line=dict(color='green'), yaxis='y2'))
-
-# Trace 3: train accuracy (rolling avg last 5) on accuracy axis y2
-fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Train accuracy (avg last 5)', line=dict(color='yellow'), yaxis='y2'))
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Validation loss', line=dict(color='blue'), yaxis='y'))
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Train loss', line=dict(color='cyan'), yaxis='y'))
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Validation accuracy', line=dict(color='green'), yaxis='y2'))
+fig.add_trace(go.Scatter(x=accuracy_gens, y=[], mode='lines', name='Train accuracy', line=dict(color='yellow'), yaxis='y2'))
 
 fig.update_layout(
     title='Error and Accuracy vs Generation (Training Progress)',
     xaxis_title='Generation (k)',
     # Primary error axis (put on the right)
     yaxis=dict(
-        title='Error',
+        title='Loss',
         color='blue',
         side='left',
     ),
     # Single accuracy axis for both accuracy traces (also on the right, slightly further)
     yaxis2=dict(
-        title='Accuracy (%) (avg last 5)',
+        title='Accuracy (%)',
         color='green',
         overlaying='y',
         side='right',
     ),
+
     margin=dict(l=60, r=160, t=60, b=60),
     legend=dict(y=0.99, x=0.01),
     hovermode="x unified"
@@ -135,19 +146,22 @@ def smooth_labels(y_onehot, eps=0.02):
 
     return y_onehot * (1.0 - eps) + eps / K
 
-def onehot_batch(mini_set, training=True):
+def onehot_batch(mini_set, test=False, training=True):
     batch = np.zeros((10, len(mini_set)), dtype=np.float32)
 
-    if training:
+    if not test:
         for j, idx in enumerate(mini_set):
             batch[y_train[idx], j] = 1.0
 
     else:
         for j, idx in enumerate(mini_set):
-            batch[y_test[idx], j] = 1.0
+            batch[y_valid[idx], j] = 1.0
 
-    return smooth_labels(batch)   # implement smoothing to work on arrays
+    if training:
+        return smooth_labels(batch)
 
+    else:
+        return batch
 
 def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshold, scale_threshold=0.30):
     # Normalize to uint8 28x28 greyscale
@@ -231,27 +245,24 @@ def augment_image(img_array, noise_multiplier, rotation_threshold, move_threshol
 def update_graph(n):
     global fig
 
-    # convert to plain lists to avoid JSON serialization problems
+    test_avg = rolling_avg(list(accuraciesTest), window=5)
+    train_avg = rolling_avg(list(accuraciesTrain), window=5)
+    trainLoss_avg = rolling_avg(trainLosses, window=5)
+    testLoss_avg = rolling_avg(testLosses, window=5)
+
     x_vals = list(accuracy_gens)
 
-    # update raw error line (trace 0)
     fig.data[0].x = x_vals
-    fig.data[0].y = list(errors)
+    fig.data[0].y = testLoss_avg
 
-    # compute rolling average over last 5 errors and set trace 1
-    err_avg5 = rolling_avg(list(errors), window=5)
     fig.data[1].x = x_vals
-    fig.data[1].y = err_avg5
-
-    # For accuracies, plot rolling average (last 5)
-    test_avg5 = rolling_avg(list(accuraciesTest), window=5)
-    train_avg5 = rolling_avg(list(accuraciesTrain), window=5)
+    fig.data[1].y = trainLoss_avg
 
     fig.data[2].x = x_vals
-    fig.data[2].y = test_avg5
+    fig.data[2].y = test_avg
 
     fig.data[3].x = x_vals
-    fig.data[3].y = train_avg5
+    fig.data[3].y = train_avg
 
     return fig
 
@@ -259,18 +270,118 @@ def update_graph(n):
 import numpy as np
 import random
 
-def test_accuracy(samples=1000, batch_size=256):
+def test_accuracy(samples=10000, batch_size=256):
     # --- Test set ---
     good = 0
-    n_test = len(x_test)
+    n_test = len(x_valid)
     samples_test = min(samples, n_test)
 
     # random indices for test
     idxs = np.random.randint(0, n_test, size=samples_test)
 
+    total_test_loss = 0.0
+    total_test_samples = 0
+
     # process in minibatches
     for start in range(0, samples_test, batch_size):
         end = min(start + batch_size, samples_test)
+        batch_idxs = idxs[start:end]
+
+        # build batch X of shape (B, D)
+        X_batch = np.stack([np.asarray(x_valid[i]).flatten() for i in batch_idxs], axis=0).astype(np.float32)
+        Y = onehot_batch(batch_idxs, test=True, training=False).T
+
+        # forward once for the whole batch
+        out = nn.forward(X_batch)
+        out = np.asarray(out)
+
+        # get predictions
+        if out.ndim == 2:
+            preds = np.argmax(out, axis=1)
+        else:
+            preds = np.argmax(out, axis=0)  # fallback for single-sample output
+
+        # true labels
+        trues = np.array([y_valid[i] for i in batch_idxs])
+
+        # compute loss robustly:
+        # - if nn.get_loss returns a scalar mean loss for the batch, multiply by batch_size
+        # - if it returns per-sample losses (array), sum them
+        loss = nn.get_loss(out, Y)
+
+        total_test_loss += loss
+        total_test_samples += len(batch_idxs)
+
+        good += int(np.sum(preds == trues))
+
+    # mean test loss over sampled test examples
+    testError = total_test_loss / total_test_samples
+    accTest = round((good / samples_test) * 10000) / 100
+
+    # --- Train set (with augmentation) ---
+    good = 0
+    n_train = len(x_train)
+    samples_train = min(samples, n_train)
+
+    idxs = np.random.randint(0, n_train, size=samples_train)
+
+    total_train_loss = 0.0
+    total_train_samples = 0
+
+    for start in range(0, samples_train, batch_size):
+        end = min(start + batch_size, samples_train)
+        batch_idxs = idxs[start:end]
+
+        # apply augmentation per-sample but batch before forward
+        batch_imgs = []
+        for i in batch_idxs:
+            original = x_train[i]
+            #augmented = augment_image(original, image_noise, rotation, move)
+            #batch_imgs.append(np.asarray(augmented).flatten())
+            batch_imgs.append(np.asarray(original).flatten())
+
+        X_batch = np.stack(batch_imgs, axis=0).astype(np.float32)
+        Y = onehot_batch(batch_idxs, test=False, training=False).T
+
+        out = nn.forward(X_batch)
+        out = np.asarray(out)
+
+        if out.ndim == 2:
+            preds = np.argmax(out, axis=1)
+        else:
+            preds = np.argmax(out, axis=0)
+
+        trues = np.array([y_train[i] for i in batch_idxs])
+
+        loss_val = nn.get_loss(out, Y)
+
+        if np.ndim(loss_val) == 0:
+            batch_loss_sum = float(loss_val)
+        else:
+            batch_loss_sum = float(np.sum(loss_val))
+
+        total_train_loss += batch_loss_sum
+        total_train_samples += len(batch_idxs)
+
+        good += int(np.sum(preds == trues))
+
+    # mean train loss over sampled train examples
+    trainError = total_train_loss / total_train_samples
+    accTrain = round((good / samples_train) * 10000) / 100
+
+    return accTest, accTrain, testError, trainError
+
+def full_test(batch_size=256):
+    # --- Test set ---
+    good = 0
+    n_test = len(x_test)
+
+    # random indices for test
+    idxs = np.random.randint(0, n_test, size=n_test)
+
+    # process in minibatches
+    for start in range(0, n_test, batch_size):
+        end = min(start + batch_size, n_test)
         batch_idxs = idxs[start:end]
 
         # build batch X of shape (B, D)
@@ -291,17 +402,16 @@ def test_accuracy(samples=1000, batch_size=256):
 
         good += int(np.sum(preds == trues))
 
-    accTest = round((good / samples_test) * 10000) / 100
+    accTest = round((good / n_test) * 10000) / 100
 
     # --- Train set (with augmentation) ---
     good = 0
     n_train = len(x_train)
-    samples_train = min(samples, n_train)
 
-    idxs = np.random.randint(0, n_train, size=samples_train)
+    idxs = np.random.randint(0, n_train, size=n_train)
 
-    for start in range(0, samples_train, batch_size):
-        end = min(start + batch_size, samples_train)
+    for start in range(0, n_train, batch_size):
+        end = min(start + batch_size, n_train)
         batch_idxs = idxs[start:end]
 
         # apply augmentation per-sample but batch before forward
@@ -324,38 +434,9 @@ def test_accuracy(samples=1000, batch_size=256):
 
         good += int(np.sum(preds == trues))
 
-    accTrain = round((good / samples_train) * 10000) / 100
+    accTrain = round((good / n_train) * 10000) / 100
 
     return accTest, accTrain
-
-
-
-def full_test():
-    rightTest = 0
-    rightTrain = 0
-
-    for i, img in enumerate(x_test):
-        x = img.flatten()
-        y = y_test[i]
-
-        pred = np.argmax(nn.forward(x))
-
-        if pred == y:
-            rightTest += 1
-
-    for i, img in enumerate(x_train):
-        x = img.flatten()
-        y = y_train[i]
-
-        pred = np.argmax(nn.forward(x))
-
-        if pred == y:
-            rightTrain += 1
-
-    testAcc = round(rightTest / len(x_test), 4) * 100
-    trainAcc = round(rightTrain / len(x_train), 4) * 100
-
-    return testAcc, trainAcc
 
 def augmented(mini_set, training=True):
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -370,20 +451,40 @@ def augmented(mini_set, training=True):
     return x
 
 def updateStats(gen):
-    global avg_error, accuraciesTest, accuraciesTrain, accuracy_gens, errors, batch_size
+    global avg_error, accuraciesTest, accuraciesTrain, accuracy_gens, errors, batch_size, testLosses, trainLosses, overfitting, best_valid_loss
 
-    accuracyTest, accuracyTrain = test_accuracy(1000)
+    accuracyTest, accuracyTrain, validLoss, trainLoss = test_accuracy(10000)
     accuraciesTest.append(accuracyTest)
     accuraciesTrain.append(accuracyTrain)
+    testLosses.append(validLoss)
+    trainLosses.append(trainLoss)
     accuracy_gens.append(gen)
-
-    errors.append(avg_error)
-
-    # Save weights
-    np.savez('network.npz', w1=nn.w1, w2=nn.w2, b1=nn.b1, b2=nn.b2)
 
     print(f"Test accuracy: {accuracyTest}%")
     print(f"Train accuracy: {accuracyTrain}%")
+    print(f"Test loss: {validLoss}")
+    print(f"Train loss: {trainLoss}")
+
+    if validLoss > last_valid_loss and trainLoss < last_train_loss:
+        overfitting += 1
+
+    else:
+        overfitting = 0
+
+        if validLoss < best_valid_loss:
+            best_valid_loss = validLoss
+
+            #save weights only on the best iteration
+            np.savez('network.npz', w1=nn.w1, w2=nn.w2, b1=nn.b1, b2=nn.b2)
+
+    if overfitting >= patience:
+        print("Stopping early because of overfitting.")
+
+        testAcc, trainAcc = full_test()
+
+        print(f"Test accuracy: {testAcc}\nTrain accuracy: {trainAcc}")
+
+        quit(0)
 
 def update(generation, epoch, epochs, start_time, x, lr, batch, gen):
     print("\033c", end="")
@@ -391,8 +492,8 @@ def update(generation, epoch, epochs, start_time, x, lr, batch, gen):
     print(f"Epoch {epoch}/{epochs}")
     print(f"Generation {generation}")
     print(f"Image {batch}/{len(x_train)}")
-    print(f"Lr: {lr} \n")
-    print(f"Train time: {round(time.time() - start_time)} seconds")
+    print(f"Lr: {lr}")
+    print(f"Train time: {round(time.time() - start_time)} seconds ({round((time.time() - start_time) / 60)} minutes) ")
 
     updateStats(gen)
 
@@ -419,13 +520,13 @@ def training_loop():
 
     start_time = time.time()
 
-    print("\nStarted training \n")
-
     print(f"Total epochs: {epochs}")
 
     print(f"Max lr: {max_lr} \nMin lr: {min_lr} \n")
 
     time.sleep(2)
+
+    print("Started training")
 
     indices = np.arange(len(x_train))
 
@@ -453,7 +554,11 @@ def training_loop():
             if generation % updateStep == 0:
                 Thread(update(generation, epoch, epochs, start_time, X, lr, batch, generation), daemon=True).start()
 
-    quit(0)
+    testAcc, trainAcc = full_test()
+
+    print("\nTraining finished!")
+
+    print(f"Test accuracy: {testAcc}\nTrain accuracy: {trainAcc}")
 
 # Start training thread
 Thread(target=training_loop, daemon=True).start()

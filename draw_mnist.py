@@ -117,6 +117,7 @@ def canvas_to_image_array():
 
 def predict_once():
     global predictions
+
     try:
         arr = canvas_to_image_array()
         img_flat = arr.flatten().astype(np.float32)
@@ -126,7 +127,9 @@ def predict_once():
             probs = out / out.sum()
         else:
             probs = out
-        predictions = probs
+
+        predictions = probs.reshape(-1,)
+
     except Exception as e:
         print("Prediction error:", e)
 

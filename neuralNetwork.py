@@ -9,7 +9,7 @@ class NeuralNetwork:
         self.b2 = np.zeros((output_size)).astype(np.float32)
 
         if load:
-            print("loading...")
+            print("Loading network...")
 
             try:
                 data = np.load("network.npz")
@@ -177,6 +177,9 @@ class NeuralNetwork:
         v_hat = v / (1 - beta2 ** t)
 
         return m_hat / (np.sqrt(v_hat) + eps), m, v, t
+
+    def get_loss(self, a, y_true):
+        return self.cross_entropy(a, y_true)
 
     def augment_weights(self, y_true):
         self.error += self.cross_entropy(self.a2, y_true)
