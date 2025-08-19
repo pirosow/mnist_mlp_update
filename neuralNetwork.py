@@ -2,12 +2,6 @@ import numpy as np
 
 class NeuralNetwork:
     def __init__(self, input_size, hidden_size, output_size, load=False):
-        self.w1 = (np.random.randn(hidden_size, input_size).astype(np.float32) * np.sqrt(2.0 / input_size))
-        self.w2 = (np.random.randn(output_size, hidden_size).astype(np.float32) * np.sqrt(2.0 / hidden_size))
-
-        self.b1 = np.zeros((hidden_size)).astype(np.float32)
-        self.b2 = np.zeros((output_size)).astype(np.float32)
-
         if load:
             print("Loading network...")
 
@@ -22,6 +16,13 @@ class NeuralNetwork:
 
             except:
                 raise("Could not load network weights.")
+
+        else:
+            self.w1 = (np.random.randn(hidden_size, input_size).astype(np.float32) * np.sqrt(2.0 / input_size))
+            self.w2 = (np.random.randn(output_size, hidden_size).astype(np.float32) * np.sqrt(2.0 / hidden_size))
+
+            self.b1 = np.zeros((hidden_size)).astype(np.float32)
+            self.b2 = np.zeros((output_size)).astype(np.float32)
 
         self.batch = 0
 

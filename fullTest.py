@@ -1,22 +1,14 @@
-import os
-from copy import deepcopy
-
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
 from neuralNetwork import NeuralNetwork
 import numpy as np
-from tensorflow.keras.datasets import mnist
-import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output
-import plotly.graph_objects as go
-from threading import Thread
 import random
 from PIL import Image
 import time
 
 # Load MNIST dataset
-(x_train, y_train), (x_test, y_test) = mnist.load_data()
+mnist = np.load("mnist/mnist.npz")
+
+x_train, y_train = mnist['x_train'], mnist['y_train']
+x_test,  y_test  = mnist['x_test'],  mnist['y_test']
 
 # Reshape and normalize
 x_train = x_train.reshape(-1, 28, 28, 1) / 255.0
@@ -154,6 +146,36 @@ def full_test(batch_size=256):
         # apply augmentation per-sample but batch before forward
         batch_imgs = []
         for i in batch_idxs:
+            batch_imgs.append(x_train[i].flatten())
+
+        X_batch = np.stack(batch_imgs, axis=0).astype(np.float32)
+
+        out = nn.forward(X_batch)
+        out = np.asarray(out)
+        if out.ndim == 2:
+            preds = np.argmax(out, axis=1)
+        else:
+            preds = np.argmax(out, axis=0)
+
+        trues = np.array([y_train[i] for i in batch_idxs])
+
+        good += int(np.sum(preds == trues))
+
+    accTrain = round((good / n_train) * 10000) / 100
+
+    # --- Train set (with augmentation) ---
+    good = 0
+    n_train = len(x_train)
+
+    idxs = np.random.randint(0, n_train, size=n_train)
+
+    for start in range(0, n_train, batch_size):
+        end = min(start + batch_size, n_train)
+        batch_idxs = idxs[start:end]
+
+        # apply augmentation per-sample but batch before forward
+        batch_imgs = []
+        for i in batch_idxs:
             original = x_train[i]
             augmented = augment_image(original, image_noise, rotation, move)  # your augment params
             batch_imgs.append(np.asarray(augmented).flatten())
@@ -171,15 +193,15 @@ def full_test(batch_size=256):
 
         good += int(np.sum(preds == trues))
 
-    accTrain = round((good / n_train) * 10000) / 100
+    accAug = round((good / n_train) * 10000) / 100
 
-    return accTest, accTrain
+    return accTest, accTrain, accAug
 
 print("Testing...")
 
 startTime = time.time()
 
-testAcc, trainAcc = full_test(batch_size=1024)
+testAcc, trainAcc, augAcc = full_test(batch_size=1024)
 
-print(f"Test accuracy: {testAcc}\nTrain accuracy: {trainAcc}")
+print(f"Test accuracy: {testAcc}\nTrain accuracy: {trainAcc}\nAugmented accuracy: {augAcc}")
 print(f"Calculated in {round(time.time() - startTime, 4)} seconds")

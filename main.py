@@ -19,7 +19,7 @@ batch_size = 256
 min_lr = 0.000001 #0.01
 max_lr = 0.001 #0.25
 
-patience = 5
+patience = 3
 
 overfitting = 0
 
@@ -531,6 +531,8 @@ def training_loop():
     indices = np.arange(len(x_train))
 
     generation = 0
+
+    Thread(update(generation, epoch, epochs, start_time, np.array([x_train[0]]), lr, 0, generation), daemon=True).start()
 
     for epoch in range(1, epochs + 1):
         lr -= step
